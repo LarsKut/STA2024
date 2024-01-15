@@ -1,0 +1,81 @@
+---
+title: "Applied Stats 2 Lab 1"
+author: "Lars Kutschinski"
+format: pdf
+editor: visual
+---
+
+```{r}
+#| message: false
+library(tidyverse)
+```
+
+```         
+```
+
+```{r}
+dm <- read_table("https://www.prdh.umontreal.ca/BDLC/data/ont/Mx_1x1.txt", 
+                 skip = 2, col_types = "dcddd")
+head(dm)
+```
+
+# 1. Plot the female to male ratios
+
+```{r}
+dm <- dm |> mutate(mf_ratio = Female/Male)
+plot_data <- dm |> 
+  filter(Age == 10|Age == 20|Age == 30|Age == 40) |> 
+  select(Year, Age, mf_ratio)
+ggplot(data = plot_data, aes(x = Year, y = mf_ratio, color = Age)) + 
+  geom_line() + 
+  theme_minimal()
+```
+
+# 2. Find the minimum age for each year
+
+```{r}
+dm |> group_by(Year) |> summarize(Age[which.min(Female)])
+```
+
+# 3. Find the standard deviation
+
+```{r}
+dm |> group_by(Age) |> summarize(across(c(Male,Female,Total), sd, na.rm = TRUE)) 
+
+```
+
+# 4. Calculate the weighted average mortality rate
+
+```{r}
+dp <- read_table("https://www.prdh.umontreal.ca/BDLC/data/ont/Population.txt", skip = 1, col_types = "dcddd")
+
+total_data <-left_join(dm,dp, by = c("Year","Age"))|>
+  group_by(Year) |>
+  drop_na() |>
+  summarize(Avg_Male_Mortality = weighted.mean(Male.x, w=Male.y, na.rm = TRUE),
+            Avg_Female_Mortality = weighted.mean(Female.x, w=Female.y, na.rm = TRUE))
+
+ggplot(data = total_data, aes(x = Year)) +
+  geom_line(aes(y = Avg_Male_Mortality, color = "Male")) +
+  geom_line(aes(y = Avg_Female_Mortality, color = "Female")) +
+  labs(title = "Population Weighted Average Mortality Rate",
+       x = "Year",
+       y = "Weighted Mortality Rate") +
+  theme_dark()
+```
+
+We notice that the male weighted average mortality rate is higher than the female weighted average mortality rate. However both rates have significantly decreased over the years.
+
+# 5. Linear Regression
+
+```{r}
+dm$Age <- as.numeric(dm$Age)
+
+model_data <- dm |>
+  filter(Age < 106,Year==2000) |>
+  select(Female,Age)
+linear_model <- lm(log(Female) ~ Age, data = model_data)
+summary(linear_model)
+```
+
+The estimated coefficient for Age in our model is 0.086891. This coefficient can be interpreted as the rate of change of female mortality byage.
