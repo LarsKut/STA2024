@@ -1,0 +1,224 @@
+---
+title: "Applied_Stat_2_Lab2"
+format: pdf
+editor: visual
+---
+
+```{r}
+#| message: false
+library(opendatatoronto)
+library(tidyverse)
+library(stringr)
+library(skimr) # EDA
+library(visdat) # EDA
+library(janitor)
+library(lubridate)
+library(ggrepel)
+```
+
+```{r}
+res <- list_package_resources("996cfe8d-fb35-40ce-b569-698d51fc683b") # obtained code from searching data frame above
+res <- res |> mutate(year = str_extract(name, "202.?"))
+delay_2022_ids <- res |> filter(year==2022) |> select(id) |> pull()
+
+delay_2022 <- get_resource(delay_2022_ids)
+
+# make the column names nicer to work with
+delay_2022 <- clean_names(delay_2022)
+```
+
+```{r}
+delay_codes <- get_resource("3900e649-f31e-4b79-9f20-4731bbfd94f7")
+delay_data_codebook <- get_resource("ca43ac3d-3940-4315-889b-a9375e7b8aa4")
+```
+
+```{r}
+delay_2022 <- delay_2022 |> 
+  mutate(station_clean = ifelse(str_starts(station, "ST"), word(station, 1,2), word(station, 1)))
+```
+
+# Question 1 
+
+```{r}
+#Calculate mean delays and sort descending
+mean_delays <- delay_2022 |> group_by(station) |> summarize(mean_delay = mean(min_delay), na.rm = TRUE) |> arrange(desc(mean_delay))
+
+#Take 5 highest mean delays and add the rest of the data
+highest_delays <- head(mean_delays, 5)
+delay_2022_top_stations <- delay_2022 %>%
+  filter(station %in% highest_delays$station)
+
+
+ggplot(delay_2022_top_stations, aes(x = station, y = min_delay)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust =1)) +
+  facet_wrap(~line)
+```
+
+# Question 2
+
+```{r}
+delay_2022 <- delay_2022 |> 
+  left_join(delay_codes |> rename(code = `SUB RMENU CODE`, code_desc = `CODE DESCRIPTION...3`) |> select(code, code_desc)) 
+
+#Filter data by top 50% of delays
+delay_2022_top_0.5 <- delay_2022 |>
+                      filter(min_delay>0)|>
+                      group_by(code)|>
+                      summarise(no_rows = length(code))|>
+                      arrange(-no_rows)|>
+                      mutate(cumulative_sum = cumsum(no_rows))|>
+                      mutate(half_sum = sum(no_rows)/2)|>
+                      filter(cumulative_sum<=half_sum)
+
+frequent_delay_codes <- delay_2022_top_0.5$code
+
+
+lm_table_delay_code <- delay_2022 |>
+                      filter(min_delay>0 & (code %in% frequent_delay_codes))
+#Linear model with line and code as covariates
+delay_model <- lm(min_delay ~ line + code, data = lm_table_delay_code)
+summary(delay_model)
+```
+
+Our model suggests that the line "SHP" contributes significantly to delay minutes, which was not seen at all in the Explanatory Data Analysis in Question 1. This is because in Question 1 we found the five stations with highest mean delay. Naturally, the highest delay times were produced by outlier accidents that caused significantly longer delays than the total average is. Hence the stations or lines with the most frequent albeit shorter delays were not captured in the EDA. This is also explained by the fact that the most frequent delays do not contribute to the highest delays, which is also suggested by the relatively low beta coefficient estimates in our model.
+
+# Question 3
+
+```{r}
+#Data preprocessing
+all_data <- search_packages("campaign")
+campaign_id <- all_data$id
+resource <- list_package_resources(campaign_id[1])
+campaign_data <- get_resource('8b42906f-c894-4e93-a98e-acac200f34a4')
+campaign_data_mayoral <- campaign_data[[2]]
+colnames(campaign_data_mayoral) <- as.character(campaign_data_mayoral[1,])
+campaign_data_mayoral <- campaign_data_mayoral[-1,]
+rownames(campaign_data_mayoral) <- NULL
+campaign_data_mayoral <- clean_names(campaign_data_mayoral)
+
+```
+
+# Question 4 
+
+We skim through the data using the skim function.
+
+```{r}
+skim(campaign_data_mayoral)
+```
+
+There are many blank columns or columns with missing values such as 'contributors_address','authorized_representative','president_business_manager' and so on. Furthermore, there are a couple of variables that should be factors and some that should be numerical.
+
+```{r}
+not_all_na <- function(x) all(!is.na(x))
+campaign_data_mayoral <- campaign_data_mayoral|>
+                          select(where(not_all_na))
+campaign_data_mayoral
+campaign_data_mayoral$contributor_type_desc <- as.factor(campaign_data_mayoral$contributor_type_desc)
+campaign_data_mayoral$contribution_type_desc <- as.factor(campaign_data_mayoral$contribution_type_desc)
+campaign_data_mayoral$contribution_amount <- as.numeric(campaign_data_mayoral$contribution_amount)
+campaign_data_mayoral
+```
+
+# Question 5 
+
+```{r}
+campaign_data_mayoral |> arrange(-contribution_amount)
+
+ggplot(data = campaign_data_mayoral,aes(x=contribution_amount))+
+  geom_dotplot()
+
+campaign_data_mayoral_contribution_distribution <- 
+  campaign_data_mayoral |> filter(contribution_amount < 100000)
+
+ggplot(data=campaign_data_mayoral_contribution_distribution, aes(x=contribution_amount))+
+  geom_dotplot()
+
+campaign_data_mayoral_contribution_distribution_2 <- 
+  campaign_data_mayoral |> filter(contribution_amount < 10000)
+
+ggplot(data=campaign_data_mayoral_contribution_distribution_2, aes(x=contribution_amount))+
+  geom_histogram()
+
+
+
+ggplot(data = campaign_data_mayoral, aes(x = candidate,
+                                         y = contribution_amount,
+                                         color = contribution_type_desc ))+
+  geom_point()+
+  geom_smooth()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Looking at the plots above, the following outliers can be found: The biggest outlier is the donation of 500,000\$ by Doug Ford. Then there are also a few other donations close to 100,000\$ done by candidates Ryan Emond and Rob Ford. After filtering for donations less than 100,000\$ we see a few outlier donations of above 20,000\$. Thus we filter once more for donations less than 10,000\$ to get a better sense of the majority of the data.
+
+# Question 6
+
+```{r}
+candidate_contri <- campaign_data_mayoral|>
+                    group_by(candidate) |>
+                    summarise(
+                    total_contri = sum(contribution_amount, na.rm = TRUE),
+                    mean_contri = mean(contribution_amount, na.rm = TRUE),
+                    contri_count = n()
+                    )
+
+top_total_contri <- candidate_contri |>
+                    arrange(-total_contri)|>
+                    select(candidate,total_contri)|>
+                    head(5)
+top_mean_contri <- candidate_contri |>
+                   arrange(-mean_contri)|>
+                   select(candidate,mean_contri)|>
+                   head(5)
+top_contri_count <- candidate_contri |>
+                    arrange(-contri_count)|>
+                    select(candidate,contri_count)|>
+                    head(5)
+
+top_total_contri
+top_mean_contri
+top_contri_count
+```
+
+# Question 7
+
+```{r}
+non_candidate_contri <- campaign_data_mayoral |>
+                        filter(contributors_name != candidate)
+
+non_candidate_contri <- non_candidate_contri|>
+                        group_by(candidate) |>
+                        summarise(
+                        total_contri_popular = sum(contribution_amount, na.rm = TRUE),
+                        mean_contri_popular = mean(contribution_amount, na.rm = TRUE),
+                        contri_count_popular = n()
+                    )
+
+top_total_contri_popular <- non_candidate_contri |>
+                            arrange(-total_contri_popular)|>
+                            select(candidate,total_contri_popular)|>
+                            head(5)
+top_mean_contri_popular <- non_candidate_contri |>
+                           arrange(-mean_contri_popular)|>
+                           select(candidate,mean_contri_popular)|>
+                           head(5)
+top_contri_count_popular <- non_candidate_contri |>
+                            arrange(-contri_count_popular)|>
+                            select(candidate,contri_count_popular)|>
+                            head(5)
+top_total_contri_popular
+top_mean_contri_popular
+top_contri_count_popular
+```
+
+# Question 8
+
+```{r}
+multiple_contri <- campaign_data_mayoral |>
+  group_by(contributors_name) |>
+  summarise(unique_candidates = n_distinct(candidate)) 
+
+multiple_contri_count <- sum(multiple_contri$unique_candidates > 1)
+multiple_contri_count
+```
