@@ -1,0 +1,143 @@
+---
+title: "Applied_Stat_Lab_5"
+format: pdf
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+library(here)
+```
+
+## Question 1
+```{r}
+kidiq <- read_rds(here("data","kidiq.RDS"))
+hist(kidiq$mom_age)
+
+means <- kidiq |> group_by(mom_hs) |> summarize(means = mean(kid_score, na.rm =  TRUE)) 
+means
+
+plot(kidiq$mom_iq, kidiq$kid_score)
+```
+We created three different plots. In the histogram we plotted the mom's age frequency and notice that the age range is quite small with a maximum age of 28. The average age is at 22. Secondly we calculated the mean kids scores based on whether the mom obtained a high school degree. We notice that the mean is higher for mom_hs = 1. Lastly we plot the mom's iq against the kid's iq and notice that the definetely seems to be a positive correlation. The higher the moms iq, the higher the kid's iq.
+
+## Question 2
+```{r}
+y <- kidiq$kid_score
+mu0 <- 80
+sigma0 <- 0.1
+# named list to input for stan function
+data <- list(y = y,
+N = length(y),
+mu0 = mu0,
+sigma0 = sigma0)
+
+fit <- stan(file = here("stan", "kids2.stan"),
+data = data,
+chains = 3,
+iter = 500)
+
+dsamples <- fit |>
+gather_draws(mu, sigma) # gather = long format
+
+fit |> spread_draws(mu, sigma)
+dsamples |>
+median_qi(.width = 0.8)
+
+dsamples |>
+filter(.variable == "mu") |>
+ggplot(aes(.value, color = "posterior")) + geom_density(size = 1) +
+xlim(c(70, 100)) +
+stat_function(fun = dnorm,
+args = list(mean = mu0,
+sd = sigma0),
+aes(colour = 'prior'), size = 1) +
+scale_color_manual(name = "", values = c("prior" = "red", "posterior" = "black")) +
+ggtitle("Prior and posterior for mean test scores") +
+xlab("score")
+```
+As we can see the estimates for $\mu$ and $\sigma$ changed after choosing a more informative prior. We have $\hat{mu}= 80.06$ and $\hat{sigma} = 21.41$ now. 
+
+## Question 3
+### (a)
+
+```{r}
+X <- as.matrix(kidiq$mom_hs, ncol = 1)  #force this to be a matrix
+K <- 1
+data <- list(y = y, N = length(y),
+X =X, K = K)
+fit2 <- stan(file = here("stan", "kids3.stan"),
+data = data,
+iter = 1000)
+```
+
+```{r}
+linear_model <- lm(kid_score ~ mom_hs, data = kidiq)
+
+print(fit2)
+summary(linear_model)
+```
+The estimate for the intercept in the linear model is 77.548 which is very close to the posterior mean of the intercept (78.06). Furthermore the slope estimate lies at 11.771 in the linear model which is also close to the posterior mean of the slope at 11.11. 
+
+### (b)
+```{r}
+pairs(fit2, pars = c("alpha", "beta[1]"))
+```
+
+There appears to be a negative linear relationship between the intercept and the slope coefficient. This could imply multicollinearity, which would be an issue in the estimation of the coefficients.
+
+## Question 4
+```{r}
+kidiq$mom_iq_centered <- kidiq$mom_iq - mean(kidiq$mom_iq)
+X <- as.matrix(kidiq[, c("mom_hs", "mom_iq_centered")])
+K <- 2
+
+data<- list(y = y, N = length(y), X = X, K=K)
+fit3 <- stan(here("stan", "kids3.stan"), data = data, iter = 1000)
+```
+
+```{r}
+print(fit3)
+```
+
+The coefficient for mom's iq has the following interpretation: An unit increase in mom's iq amounts to a 0.57 increase in kid's iq on average.
+
+## Question 5
+```{r}
+linear_model_2 <- lm(kid_score ~ mom_hs + mom_iq_centered, data = kidiq)
+summary(linear_model_2)
+```
+The results of the linear model agree with Stan as the coefficient estimate for the centered mom iq is at 0.56391. 
+
+## Question 6
+```{r}
+ext_fit <- extract(fit3)
+alpha_post <- ext_fit$alpha
+beta_post <- ext_fit$beta
+sigma<-ext_fit$sigma
+b1<-beta_post[,1]
+b2<-beta_post[,2]
+
+posterior0 <- alpha_post  +  b1 * 0 + b2  * (110 - mean(kidiq$mom_iq))
+posterior1 <- alpha_post  + b1 * 1 + b2 * (110 - mean(kidiq$mom_iq))
+
+df <- data.frame(
+  Scores = c(posterior0, posterior1),
+  Education = rep(c("education = 0", "education = 1"), each = length(posterior0))
+)
+ggplot(df, aes(x = Scores, fill = Education)) +
+  geom_density(alpha = 0.7) +
+  labs(title = "Posterior Estimates of Scores by Education of Mother for Mothers with iq of 110") +
+  scale_fill_manual(values = c("firebrick2", "blue4"))
+```
+
+## Question 7
+```{r}
+posterior <- alpha_post  + b1 * 1 + b2 * (95 - mean(kidiq$mom_iq)) + sigma
+  data <- data.frame(Scores = posterior)
+  ggplot(data, aes(x = Scores)) +
+    geom_histogram(fill = "firebrick4", color = "black")
+```
+
