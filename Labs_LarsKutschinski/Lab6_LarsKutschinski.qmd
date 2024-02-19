@@ -1,0 +1,271 @@
+---
+title: "Applied_Stat_Lab_6"
+format: pdf
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(here)
+# for bayes stuff
+library(rstan)
+library(bayesplot) 
+library(loo) 
+library(tidybayes) 
+
+ds <- read_rds(here("data","births_2017_sample.RDS"))
+head(ds)
+```
+
+```{r}
+ds <- ds %>% 
+  rename(birthweight = dbwt, gest = combgest) %>% 
+  mutate(preterm = ifelse(gest<32, "Y", "N")) %>% 
+  filter(ilive=="Y",gest< 99, birthweight<9.999)
+```
+
+## Question 1
+### (a)
+```{r}
+ds %>%
+  ggplot() +
+  aes(x = gest, y = birthweight, color = preterm, group = preterm) +
+  geom_point() +
+  theme_bw() +
+  geom_smooth(method = "lm") +
+  labs(title = "Weight vs Gestational Age")
+```
+The gestation vs birthweight plot shows that there seems to be a difference in slopes for preterm vs full term babies for birthweight as a function of gestation. However since the cutoff for pre-term is 
+not data dependent but rather given it seems a bit arbitrary and moving the cutoff
+a bit to the right (>32) would result in slopes getting closer. Plus there is a
+big uncertainty in the line since there are significantly fewer datapoints for 
+preterm babies.
+
+### (b)
+```{r}
+ds %>%
+  ggplot() +
+  aes(x = bmi, y = birthweight, color = preterm) +
+  geom_point(alpha = 0.3) +
+  theme_minimal() +
+  labs(title = "Mother's BMI vs baby birthweight")
+```
+With this plot we tried to see whether there was any effect of mother's bmi on birthweight. However the result seems a bit unreliable, since people with a bmi of 100 do not exist.
+
+### (c)
+```{r}
+ds %>%
+  mutate(race = as_factor(case_when(
+    mracehisp == 1 ~ "NHW",
+    mracehisp == 2 ~ "NHB",
+    mracehisp == 3 ~ "NHAIAN",
+    mracehisp == 4 ~ "NHA",
+    mracehisp == 5 ~ "NHOPI",
+    mracehisp == 6 ~ "Hisp >1 race",
+    mracehisp == 7 ~ "Hisp",
+    mracehisp == 8 ~ "Unknown"
+  ))) %>%
+  group_by(race, sex) %>%
+  summarize(
+    n = n(),
+    mean_gest = mean(gest),
+    med_gest = median(gest),
+    var_gest = var(gest),
+    mean_bw = mean(birthweight),
+    med_bw = median(birthweight),
+    var_bw = var(birthweight),
+    num_preterm = sum(preterm == "Y"),
+    prop_preterm = mean(preterm == "Y")
+  ) %>%
+  arrange(desc(n))
+```
+Given that we will be modeling data for babies and that we have access to the race of mothers and the sex of the kids, it is wise to investigate whether we might be favoring one group over another by not modeling them separately or by not including race and sex as a component to explain the disparities. In order to determine whether there are any obvious variations between the gestation period, birthweight, and number of observations in each group, we produced a numerical summary. There does not seem to be too much variation in things like proportion of babies born pre-term but there are some things we should try to look more in depth at like why is the variance of gestation times so much higher for NHB than others.
+
+## Question 2
+```{r}
+set.seed(123)
+nsims <- 1000
+sigma <- abs(rnorm(nsims))
+beta0 <- rnorm(nsims)
+beta1 <- rnorm(nsims)
+
+lgc <- ds %>% mutate(log_gests_centered = scale(log(gest))) %>% pull(log_gests_centered)
+dsims <- tibble(log_gest_c = lgc) 
+
+for (i in 1:nsims) {
+  this_mu <- beta0[i] + beta1[i] * dsims$log_gest_c
+  dsims[paste0(i)] <- rnorm(3842, mean = this_mu, sd = sigma[i])
+}
+
+
+data_for_plot <- dsims %>% select(-log_gest_c) %>% pivot_longer(cols = everything()) 
+data_for_plot %>%
+  ggplot(aes(x = value)) + 
+  geom_histogram(bins = 100) +
+  theme_minimal() +
+  scale_x_continuous(name = "birthweight")
+```
+
+## Question 3
+```{r}
+ds$log_weight <- log(ds$birthweight)
+ds$log_gest_c <- (log(ds$gest) - mean(log(ds$gest)))/sd(log(ds$gest))
+
+stan_data <- list(N = nrow(ds),
+                  log_weight = ds$log_weight,
+                  log_gest = ds$log_gest_c)
+
+mod1 <- stan(data = stan_data, 
+             file = here("stan", "simple_weight.stan"),
+             iter = 500,
+             seed = 243)
+```
+
+```{r}
+summary(mod1)$summary[c("beta[1]", "beta[2]", "sigma"),]
+```
+
+```{r}
+mean_gest_37 <- (log(37) - mean(log(ds$gest)))/sd(log(ds$gest)) 
+pred_37 <- 1.1626293 + 0.1437074 * mean_gest_37
+pred_37 <- exp(pred_37)
+pred_37
+```
+A baby born at a gestational age of 37 weeks has an estimated birthweight of 2.936397
+
+## Question 4
+```{r}
+posterior_draws <- extract(mod1, pars = c("beta[1]", "beta[2]")) 
+sample_indices <- sample(1:length(posterior_draws$`beta[1]`), 50)
+beta_1_draws <- posterior_draws$`beta[1]`[sample_indices]
+beta_2_draws <- posterior_draws$`beta[2]`[sample_indices]
+
+p <- ggplot(ds, aes(x = log_gest_c, y = log_weight)) +
+  geom_point() +
+  theme_minimal()
+
+for(i in 1:50){
+  beta_1 <- beta_1_draws[i]
+  beta_2 <- beta_2_draws[i]
+
+ 
+  p <- p + geom_abline(intercept = beta_1, slope = beta_2, colour = "blue", alpha = 0.3)
+}
+print(p)
+```
+
+
+## Question 5
+```{r}
+preterm <- ifelse(ds$preterm == "Y", 1, 0)
+
+stan_data[["preterm"]] <- preterm
+
+mod2 <- stan(data = stan_data, 
+             file = here("stan", "simple_weight_interaction.stan"),
+             iter = 250,
+             seed = 243)
+```
+
+```{r}
+summary(mod2)$summary[c(paste0("beta[", 1:4, "]"), "sigma"),]
+```
+The value of the estimated interaction term coefficient is quite low at 0.08188719, indicating that it does not significantl contribute to birthweight. 
+
+## Question 6 
+
+```{r}
+set.seed(1856)
+y <- ds$log_weight
+yrep1 <- extract(mod1)[["log_weight_rep"]]
+yrep2 <- extract(mod2)[["log_weight_rep"]] # will need mod2 for later
+samp100 <- sample(nrow(yrep1), 100)
+ppc_dens_overlay(y, yrep1[samp100, ])  + ggtitle("distribution of observed versus predicted birthweights")
+```
+
+```{r}
+samp100_2 <- sample(nrow(yrep2), 100)
+y2 <- as_tibble(t(yrep2[samp100_2, ]))
+
+colnames(y2) <- 1:100
+
+dr <- as_tibble(y2)
+dr <- dr %>% bind_cols(i = 1:3842, log_weight_obs = log(ds$birthweight))
+
+dr <- dr %>% 
+  pivot_longer(`1`:`100`, names_to = "sim", values_to = "log_weight_rep")
+
+dr %>% 
+  ggplot(aes(log_weight_rep, group = sim)) + 
+  geom_density(alpha = 0.2, aes(color = "y_rep")) + 
+  geom_density(data = ds %>% mutate(sim = 1), 
+               aes(x = log(birthweight), col = "y")) + 
+  scale_color_manual(name = "", 
+                     values = c("y" = "darkblue", 
+                                "y_rep" = "lightblue")) + 
+  ggtitle("Distribution of observed vs predicted birthweights") + 
+  theme_bw(base_size = 16) + 
+  xlim(-1, 2)
+```
+
+## Question 7
+
+```{r}
+test_stat_real <- mean(ds$birthweight < 2.5)
+test_stat_rep <- dr %>% group_by(sim) %>%
+  summarize(test_stat = mean(exp(log_weight_rep) < 2.5))
+
+test_stat_rep %>%
+  ggplot(aes(x = test_stat)) +
+  geom_histogram(bins = 20, fill = "lightblue") +
+  geom_vline(xintercept = test_stat_real, color = "darkblue") +
+  theme_minimal() +
+  labs(caption = "simulated test statistics in light blue \n real test statistic in dark blue",
+       title = "Test Statistics for PPC for proportion of bw < 2.5kg")
+```
+
+## Question 8
+```{r}
+loglik1 <- extract(mod1)[["log_lik"]]
+loglik2 <- extract(mod2)[["log_lik"]]
+
+loo1 <- loo(loglik1, save_psis = TRUE)
+loo2 <- loo(loglik2, save_psis = TRUE)
+
+loo_compare(loo1, loo2)
+```
+
+After comparing the two models using loo_compare we see that model 2 is better.
+
+```{r}
+stan_data <- list(N = nrow(ds),
+                  log_weight = ds$log_weight,
+                  log_gest = ds$log_gest_c, 
+                  bmi = ds$bmi,
+                  mager = ds$mager)
+
+mod3 <- stan(data = stan_data, 
+             file = here("stan", "simple_weight_add_covariates.stan"),
+             iter = 500,
+             seed = 243)
+```
+
+```{r}
+summary(mod3)$summary[c(paste0("beta[", 1:4, "]"), "sigma"),]
+loglik3 <- extract(mod3)[["log_lik"]]
+loo3 <- loo(loglik3, save_psis = TRUE)
+loo_compare(loo3, loo2)
+```
+We see that model 2 is better according to the loo_compare function. Let's compare the LOO-PIT for each model to compare the goodness of fit.
+
+LOO-PIT for model 2: 
+```{r}
+ppc_loo_pit_overlay(yrep = yrep2, y = y, lw = weights(loo2$psis_object))
+```
+LOO-PIT for model 3
+```{r}
+yrep3 <- extract(mod3)[["log_weight_rep"]]
+ppc_loo_pit_overlay(yrep = yrep3, y = y, lw = weights(loo3$psis_object))
+```
+The LOO-PIT values for model 2 seem to look slightly more uniform, but it is hard to tell in this case.
+
