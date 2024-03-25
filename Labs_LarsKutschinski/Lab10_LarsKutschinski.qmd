@@ -1,0 +1,239 @@
+---
+title: "Week 10: Temporal data"
+date: today
+date-format: "DD/MM/YY"
+format: pdf
+execute: 
+  warning: false
+  message: false
+---
+
+# Child mortality in Sri Lanka
+
+```{r}
+library(tidyverse)
+library(here)
+library(rstan)
+library(tidybayes)
+library(janitor)
+
+lka <- read_csv(here("data", "lka.csv"))
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se,
+                  ymax = logit_ratio + se,
+                  fill =  source), alpha = 0.1) +
+  theme_bw()+
+  labs(title = "Ratio of neonatal to other child mortality (logged), Sri Lanka", y = "log ratio")
+```
+
+# Fitting a linear model 
+
+Let's firstly fit a linear model in time to these data. Here's the code to do this:
+
+```{r, results = FALSE}
+observed_years <- lka$year
+years <- min(observed_years):max(observed_years)
+nyears <- length(years)
+
+stan_data <- list(y = lka$logit_ratio, year_i = observed_years - years[1]+1, 
+                  T = nyears, years = years, N = length(observed_years), 
+                  mid_year = mean(years), se = lka$se, P = 8)
+
+mod <- stan(data = stan_data,
+             file = here("stan", "lka_linear_me.stan"))
+```
+
+Extract the results:
+
+```{r}
+res <- mod %>% 
+  gather_draws(mu[t]) %>% 
+  median_qi() %>% 
+  mutate(year = years[t])
+```
+
+
+Plot the results:
+
+```{r}
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se, 
+                  ymax = logit_ratio + se, 
+                  fill =  source), alpha = 0.1) + 
+  theme_bw()+
+  geom_line(data = res, aes(year, .value)) + 
+  geom_ribbon(data = res, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  theme_bw()+
+  labs(title = "Ratio of neonatal to under-five child mortality (logit), Sri Lanka",
+       y = "logit ratio", subtitle = "Linear fit in black")
+```
+
+## Question 1
+
+```{r}
+res_new <- mod |>
+  gather_draws(projected_mu[p]) |>
+  median_qi() |>
+  mutate(year = years[nyears]+p)
+
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se, 
+                  ymax = logit_ratio + se, 
+                  fill =  source), alpha = 0.1) + 
+  theme_bw()+
+  geom_line(data = res, aes(year, .value)) + 
+  geom_ribbon(data = res, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res_new, aes(year, .value), col = 'lightseagreen') + 
+  geom_ribbon(data = res_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2, fill = 'lightseagreen')+
+  theme_bw()+
+  labs(title = "Ratio of neonatal to under-five child mortality (logit), Sri Lanka",
+       y = "logit ratio", subtitle = "Linear fit in black, projection in light green")
+```
+We added a generated quantities block in the stan file for the linear model that generates projections for the years 2014-2022. The added projections can be seen by the red line in the plot 
+
+
+## Question 2
+
+```{r}
+lka_5 <- read.csv(here("data", "lka_estimated.csv"), skip = 5)
+lka_5 <- lka_5 |> filter(Year > 1951) |> mutate(year = Year)
+lka_5 <- clean_names(lka_5)
+
+ratio_estimate <- rbind(res %>% select(.value, .lower, .upper, year), 
+                        res_new %>% select(.value, .lower, .upper, year)) |>
+                        mutate(ratio_est = 1/(1 + exp(-.value)),
+                               ratio_lower = 1/(1 + exp(-.lower)),
+                               ratio_upper = 1/(1 + exp(-.upper))
+                               )
+estimate <- left_join(lka_5, ratio_estimate, by = "year") |>
+                mutate(neo_est = estimate * ratio_est,
+                       neo_lower = lower_bound * ratio_lower,
+                       neo_upper = upper_bound * ratio_upper)
+estimate <- na.omit(estimate)
+
+ggplot(estimate, aes(x = year)) +
+  geom_line(data = subset(estimate,year <= 2014),aes(y = neo_est)) +
+  geom_ribbon(data = subset(estimate,year <= 2014),aes(ymin = neo_lower, ymax = neo_upper), alpha = 0.2) +
+  geom_line(data = subset(estimate,year > 2014),aes(y = neo_est), color = "lightseagreen") +
+  geom_ribbon(data = subset(estimate,year > 2014) ,aes(ymin = neo_lower, ymax = neo_upper), fill = "lightseagreen", alpha = 0.2) +
+  
+  labs(title = "Neonatal Mortality Estimates and Projections in Sri Lanka",
+       y = "Neonatal Mortality",
+       x = "Year", subtitle = "Projection in light green") +
+  theme_minimal()
+```
+
+
+## Question 3
+
+```{r}
+mod1 <- stan(data = stan_data,
+             iter = 3000,
+             file = here("stan", "FirstOrderRW.stan"))
+```
+
+```{r}
+res1 <- mod1 |>
+  gather_draws(mu[t]) |>
+  median_qi() |>
+  mutate(year = years[t])
+
+res1_new <- mod1 |>
+  gather_draws(projected_mu[p]) |>
+  median_qi() |>
+  mutate(year = years[nyears]+p)
+```
+
+```{r}
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se, 
+                  ymax = logit_ratio + se, 
+                  fill =  source), alpha = 0.1) + 
+  theme_bw()+
+  geom_line(data = res1, aes(year, .value)) + 
+  geom_ribbon(data = res1, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res1_new, aes(year, .value), col = 'lightseagreen') + 
+  geom_ribbon(data = res1_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2, fill = 'lightseagreen')+
+  theme_bw()+
+  labs(title = "Ratio of neonatal to under-five child mortality (logit), Sri Lanka",
+       y = "logit ratio", subtitle = "Random walk(1) fit in black, projection in light green")
+```
+
+
+## Question 4
+
+```{r}
+mod2 <- stan(data = stan_data,
+             iter = 3000,
+             file = here("stan","SecondOrderRW.stan"))
+```
+```{r}
+res2 <- mod2 |>
+  gather_draws(mu[t]) |>
+  median_qi() |>
+  mutate(year = years[t])
+
+res2_new <- mod2 |>
+  gather_draws(projected_mu[p]) |>
+  median_qi() |>
+  mutate(year = years[nyears]+p)
+```
+
+```{r}
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se, 
+                  ymax = logit_ratio + se, 
+                  fill =  source), alpha = 0.1) + 
+  theme_bw()+
+  geom_line(data = res2, aes(year, .value)) + 
+  geom_ribbon(data = res2, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res2_new, aes(year, .value), col = 'lightseagreen') + 
+  geom_ribbon(data = res2_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2, fill = 'lightseagreen')+
+  theme_bw()+
+  labs(title = "Ratio of neonatal to under-five child mortality (logit), Sri Lanka",
+       y = "logit ratio", subtitle = "Random walk(2) fit in black, projection in light green")
+
+```
+
+## Question 5
+
+```{r}
+ggplot(lka, aes(year, logit_ratio)) +
+  geom_point(aes( color = source)) + 
+  geom_line(aes( color = source), lty = 2) + 
+  geom_ribbon(aes(ymin = logit_ratio - se, 
+                  ymax = logit_ratio + se, 
+                  fill =  source), alpha = 0.1) +
+  geom_line(data = res, aes(year, .value)) + 
+  geom_ribbon(data = res, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res_new, aes(year, .value)) + 
+  geom_ribbon(data = res_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  
+  geom_line(data = res1, aes(year, .value)) + 
+  geom_ribbon(data = res1, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res1_new, aes(year, .value), col = 'blue') + 
+  geom_ribbon(data = res1_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2, fill = 'blue')+
+  geom_line(data = res2, aes(year, .value)) + 
+  geom_ribbon(data = res2, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2)+
+  geom_line(data = res2_new, aes(year, .value), col = 'red') + 
+  geom_ribbon(data = res2_new, aes(y = .value, ymin = .lower, ymax = .upper), alpha = 0.2, fill = 'red')+
+  theme_bw()+
+  labs(title = "Ratio of neonatal to under-five child mortality (logit), Sri Lanka",
+       y = "logit ratio", subtitle = "Linear fit in black, RW(1) in blue and RW(2) in red")
+
+
+```
+
+
+## Question 6
+The plot that we created in question 2 showed that mortality rates have been decreasing significantly over the years. The data with the logit ratio has not clearly been reflecting that however, having a many fluctuations, which resulted in what looks like an increasing trend. Ideally our model should predict a decrease in mortality rate (equivalently in the log ratio), which the second order random walk model clearly shows the most. Hence that model should be preferred.
