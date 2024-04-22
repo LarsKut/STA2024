@@ -1,0 +1,460 @@
+---
+title: "Forecasting Renewable Energy Developments using Bayesian Time-Series Models"
+format: pdf
+editor: visual
+author: Lars Kutschinski
+execute:
+  echo: false
+  warning: false
+abstract: This study utilizes the World Development Indicators (WDI) database from the World Bank to forecast renewable energy usage progress over the next seven years. We analyze data spanning the past thirty years, focusing on renewable energy and other development indicators from various countries. Two distinct time-series models are employed, incorporating Bayesian methods to derive our forecasts. Results indicate significant variability in renewable energy adoption rates across countries, influenced by economic status and urbanization levels. We find that a non-zero mean AR(1) model shows good performance results. The model predicts increases in renewable energy consumption for well developed countries and decreases for countries that have more recently experienced economic growth.
+---
+
+# Introduction
+
+In recent years, the shift toward renewable energy has been recognized as crucial in the global effort to mitigate climate change, reduce greenhouse gas emissions, and enhance sustainable energy security. The pace at which renewable energy is adopted and integrated into national grids varies significantly across countries, driven by factors that include economic conditions and urban development. This project focuses on understanding how these specific elements---GDP per capita and urban population percentage---affect the adoption of renewable energy. Furthermore we will focus on making forecasts for the next seven years of renewable energy development. An argument could be made that a more enticing problem of interest would be forecasting the production of renewable energy instead of consumption, but we argue that these problems are more or less the same, since production of energy goes hand in hand with it's consumption.
+
+Numerous global organizations, such as the World Bank, are instrumental in advancing sustainable development and in tracking the progress of such initiatives through the aggregation and analysis of data. A valuable asset in these efforts is the World Development Indicators (WDI) database, managed by the World Bank, which provides comprehensive data on various development indicators spanning several decades. Utilizing this rich dataset, our analysis will employ time series models to examine the influences of GDP per capita and urban population percentage on renewable energy consumption. Furthermore, we aim to forecast future trends in renewable energy usage, which is essential for crafting effective policies and interventions to accelerate its adoption in alignment with global sustainability objectives. This timely exploration offers insights into the dynamics shaping renewable energy growth, highlighting the importance of economic and urban factors in shaping sustainable energy landscapes. 
+
+# Data
+
+As previously mentioned, our analysis will utilize data from the World Development Indicators (WDI) database maintained by the World Bank. This extensive dataset contains 1,486 development indicators, collected from a variety of officially recognized international sources spanning the years 1960 to 2022. While the WDI includes data for 266 countries, our study narrows the focus to a selected group of 10 countries to manage the complexity of our analysis. This selection represents a diverse array of development stages: highly developed nations such as the United States, Canada, and Germany; emerging economies like China and India; countries heavily reliant on renewable energy including Iceland and Sweden; and developing nations such as Brazil and Uganda. This strategic choice of countries is designed to effectively capture the varying trends in renewable energy consumption across different economic landscapes
+
+| Countries     |
+|---------------|
+| Brazil        |
+| Canada        |
+| China         |
+| France        |
+| Germany       |
+| Iceland       |
+| India         |
+| Sweden        |
+| Uganda        |
+| United States |
+
+Now we will briefly go over the variables that are present in our data and that we will use for the regression analysis:
+
+-   Renewable energy (renewable_energy): The proportion of renewable energy consumption in total final energy consumption.
+-   Country (country): Selected countries 
+-   Years (year): Time period of data collection (1960-2022)
+-   GDP per capita in US\$ (gdp_per_capita): Measures the average economic output per person
+-   Urban population as % of total population (urban_population): Indicates the proportion of the country's population living in urban areas
+
+```{r, include = FALSE, warning = FALSE}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(janitor)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(corrplot)
+library(patchwork)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(rstan)
+library(bayesplot)
+library(tidybayes)
+library(loo)
+```
+
+```{r, echo = FALSE}
+wdi_data <- read.csv(here("data", "WDIData.csv"))
+```
+
+```{r, echo = FALSE}
+proj_data <- wdi_data |> 
+   filter(Country.Code == "USA"| 
+          Country.Code == "CAN"| 
+          Country.Code == "DEU"|
+          Country.Code == "FRA"|
+          Country.Code == "SWE"|
+          Country.Code == "UGA"|
+          Country.Code == "BRA"|
+          Country.Code == "CHN"|
+          Country.Code == "IND"|
+          Country.Code == "ISL") 
+selected_data <- select(proj_data, Country.Name, Indicator.Name, starts_with("X"))
+selected_data<- selected_data %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Year", values_to = "Value") %>%
+  mutate(Year = as.integer(sub("X", "", Year))) 
+
+selected_data <- selected_data %>%
+  pivot_wider(names_from = Indicator.Name, values_from = Value) %>%
+  arrange(Country.Name, Year)
+selected_data <- clean_names(selected_data)
+```
+
+```{r, echo = FALSE}
+selected_data <- selected_data |> 
+  select(country_name,
+         year,
+         gdp_per_capita_current_us,
+         urban_population_percent_of_total_population,
+         renewable_energy_consumption_percent_of_total_final_energy_consumption)
+selected_data <- selected_data |> 
+  rename(gdp_per_capita = gdp_per_capita_current_us,
+         renewable_energy = renewable_energy_consumption_percent_of_total_final_energy_consumption,
+         urban_population = urban_population_percent_of_total_population,
+         country = country_name)
+```
+
+Missing Data: The World Development Indicators (WDI) database represents a monumental effort to amass a comprehensive array of global development data. Given the ambitious scope of this endeavor, it's understandable that gathering exhaustive data for every indicator across numerous countries and over an extended timeline presents significant challenges. Certain nations, particularly those with more restrictive data-sharing policies, may contribute to gaps in the dataset, leading to a notable presence of missing data entries. Notably, data on renewable energy consumption and GDP per capita within the WDI only extends back to 1990, reflecting the evolving focus of global development metrics. In our analysis, we will adapt to this limitation by excluding data from before 1990, aligning our study period with the availability of reliable renewable energy statistics. Furthermore, the data mostly only contains renewable energy information up to 2020. Since we are making predictions for the next 7 years these prediction will be from 2021 to 2027.
+
+```{r, echo = FALSE, results = 'asis'}
+selected_data %>% 
+  head() %>%
+  kable("latex", booktabs = TRUE) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"), position = "center")
+```
+
+```{r, echo = FALSE, results = 'asis'}
+selected_data %>% 
+  filter(year >= 1990) %>% 
+  head() %>%
+  kable("latex", booktabs = TRUE) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"), position = "center")
+```
+
+```{r, echo = FALSE, warning = FALSE,fig.width=12, fig.height=4}
+plot_data <- selected_data |> filter(year >= "1990") |> select(country, year, renewable_energy)
+
+p1 <- ggplot(plot_data, aes(x = year, y = renewable_energy, color = country)) +
+  geom_line() + 
+  theme_minimal() + 
+  labs(title = "Renewable Energy Consumption over the Years",
+       x = "Years",
+       y = "renewable energy proportion",
+       color = "Country")
+
+numeric_cols <- sapply(selected_data, is.numeric)
+cor_matrix <- cor(selected_data[, numeric_cols], use = "complete.obs")
+
+melted_cor_matrix <- melt(cor_matrix)
+melted_cor_matrix <- melted_cor_matrix[which(lower.tri(cor_matrix, diag = TRUE)), ]
+
+p2 <- ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") + 
+  geom_text(aes(label = sprintf("%.2f", value)), color = "black", size = 2.5) +
+  scale_fill_gradient2(low = "blue3", high = "red3", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", name="Correlation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        axis.title = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.ticks = element_blank())  
+p1 + p2
+```
+
+In the left figure we illustrated the change in renewable energy consumption in the last 30 years. We see that a lot of countries, most notably Sweden have made good progress in increasing the consumption proportion. On the other hand, India and China's renewable energy consumption rate has actually decreased significantly, which is likely due to the increasing economic growth that those countries are investing in.
+
+In the right figure we have gathered the correlations of the variables of our data. A first trend that we notice is that gdp and urban population percentages seem to be negatively correlated with renewable energy consumption. This however could be a misleading conclusion in some cases: In the left plot we see that countries like Uganda and Iceland lead the renewable energy consumption while having comparatively low gdp's. Iceland is unique country that is rich in natural resources that make renewable energy production easier than anywhere else in the world.
+
+```{r, echo = FALSE, warning = FALSE, fig.width=12, fig.height=4}
+
+p1 <- ggplot(data = selected_data, aes(x = gdp_per_capita, y = renewable_energy, color = country)) + 
+  geom_point() + 
+  theme_minimal() +
+  labs(title = "Scatter Plot of GDP(per capita) vs. Renewable Energy", 
+       x = "GDP", y = "Renewable Energy", color = "Country")
+
+p2 <- ggplot(data = selected_data, aes(x = urban_population, y = renewable_energy, color = country)) + 
+  geom_point() + 
+  theme_minimal() +
+  labs(title = "Urban_population vs. Renewable Energy", 
+       x = "R&D", y = "Renewable Energy", color = "Country")
+
+p1 + p2
+```
+
+These two plots confirm that, while the covariates and the response appear negatively correlated in some countries, other countries show that an increase in GDP and urban population leads to an increase in renewable energy production.
+
+# Methods
+
+We will be making use of two different time-series models for our analysis. We have data ranging from 1990 to 2020 and expect there two be an auto-regressive relationship in the response variable renewable_energy. Hence AR time process modelling makes sense here.
+
+### Model 1
+
+The first model that we use is a standard non-zero mean AR(1) model. The reason for the zero-mean addition is that we model the response variable at time t using the information at time t-1 of the response as well as our two covariates gdp_per_capita and urban_population. The model thus takes the following form: $$
+ y|\gamma_t,\sigma \sim N(\gamma_t, \sigma^2)
+$$
+
+$$ 
+\gamma_t = \beta_{\text{gdp}}*gdp + \beta_{\text{urban}}*urban + \mu_t, \text{ with } \mu_t\sim AR(1)
+$$
+
+The AR(1) process $\mu_t$ is defined as:
+
+$$
+\mu_t = \rho * y_{t-1} + \varepsilon_t
+$$
+
+$$
+\varepsilon_t|\sigma \sim N(0,\sigma^2)
+$$
+
+### Model 2
+
+The second model is a second order non-zero mean Random Walk model. This model is defined as:
+
+$$
+y|\gamma_t,\sigma \sim N(\gamma_t, \sigma^2)
+$$
+
+$$
+\gamma_t = \beta_{\text{gdp}}*gdp + \beta_{\text{urban}}*urban + \mu_t, \text{ with } \mu_t\sim AR(2)
+$$ The AR(2) process $\mu_t$ is defined as:
+
+$$
+\mu_t = \rho_1 * y_{t-1}+ \rho_2 * y_{t-2} + \varepsilon_t
+$$
+
+$$
+\varepsilon_t|\sigma \sim N(0,\sigma^2)
+$$
+
+In order to have a stationary distribution the following conditions of $\rho_1$ and $\rho_2$ are required:
+
+\- $\rho_1 + \rho_2 < 1$
+
+\- $\rho_1 - \rho_2 < 1$
+
+\- $\lvert\rho_1\rvert < 1$
+
+### Priors
+
+Both models utilize mostly the same priors. We will define uninformed priors for each of our parameters:
+
+$$
+\beta_{\text{gdp}} \sim N(0,1)
+$$
+
+$$
+\beta_{\text{urban}} \sim N(0,1)
+$$
+
+$$
+\sigma \sim N^+(0,1)
+$$
+
+$$
+\rho \sim Unif(-1,1)
+$$
+
+$$
+\rho_1 \sim Unif(-1/2, 1/2) \text{ and }\rho_2 \sim Unif(-1/2, 1/2)
+$$
+
+# Results
+
+## Model Convergence and Validation
+
+We ran both of our models in rStan using the indicated priors for the parameters. The number of iteration is set to 10000, the number of Markov chains is set to 4 and the seed is set to 3105. The code for our models can be found in the repository https://github.com/LarsKut/STA2024/tree/main/Final%20Project.
+
+```{r}
+selected_data <- selected_data |> filter(year >= 1990)
+selected_data <- selected_data |> arrange(year)
+```
+
+```{r}
+X_data <- selected_data |> select(country, year, gdp_per_capita, urban_population, renewable_energy) |> filter(year <= 2020)
+remove_missing <- na.omit(X_data)
+```
+
+```{r}
+gdp_wide <- remove_missing %>%
+  select(country, year, gdp_per_capita) %>%
+  spread(key = country, value = gdp_per_capita) %>%
+  select(-year)
+gdp_wide <- as.matrix(gdp_wide)
+
+urban_wide <- remove_missing %>%
+  select(country, year, urban_population) %>%
+  spread(key = country, value = urban_population) %>%
+  select(-year)
+urban_wide <- as.matrix(urban_wide)
+
+renewable_wide <- remove_missing %>%
+  select(country, year, renewable_energy) %>%
+  spread(key = country, value = renewable_energy)%>%
+  select(-year)
+renewable_wide <- as.matrix(renewable_wide)
+```
+
+```{r, message = FALSE, results='hide'}
+rw_stan_data <- list(T = 31, J = 10, gdp = gdp_wide, urban = urban_wide, y = renewable_wide, P = 7)
+rw_model <- stan(data = rw_stan_data, seed = 3105, iter = 10000, file = here("stan", "FirstOrderTS.stan"), refresh = 0)
+```
+
+\textbf{Traceplot for Model 1}
+```{r}
+traceplot(rw_model, pars = c("beta_gdp", "beta_urban", "sigma", "rho"))
+```
+
+```{r,message = FALSE, results = 'hide'}
+rw_model_2 <- stan(data = rw_stan_data, seed = 3105, iter = 10000, file = here("stan", "SecondOrderTS.stan"), refresh =0)
+```
+\textbf{Traceplot for Model 2}
+```{r}
+traceplot(rw_model_2, pars = c("beta_gdp", "beta_urban", "sigma", "rho_1", "rho_2"))
+```
+
+First we analyze the traceplots for model 1 and 2. In both models we notice good mixing of the MCMC chains for all parameters.
+
+\textbf{Summary of Model 1}
+
+```{r}
+summary(rw_model, pars = c("beta_gdp", "beta_urban", "sigma", "rho"))$summary
+```
+
+\textbf{Summary of Model 2}
+
+```{r}
+summary(rw_model_2, pars = c("beta_gdp", "beta_urban", "sigma", "rho_1", "rho_2"))$summary
+```
+
+In the summary plots for our model we also notice Rhat values below 1.05 and high effective sample sizes for all parameters, further indicating good convergence results. We also observe that both models estimate very small effects for the coefficients of the covariates.
+
+## Model Validation
+
+Model Validation for time-series can be a bit difficult, since regular posterior predictive check methods do not work as well. The main indication for a good fit that we will use is Residual plots. We plotted the residuals across all years between 1990 and 2020 for both our models:
+
+```{r}
+posterior_rep <- extract(rw_model)$y_rep
+post_mean_rep <- apply(posterior_rep, c(2, 3), mean) 
+residuals_matrix <- renewable_wide - apply(posterior_rep, c(2, 3), mean) 
+
+years <- 1990:2020  
+J <- ncol(residuals_matrix)  
+
+residuals_data <- data.frame(
+  year = rep(years, times = J),
+  country = rep(c("Brazil", "Canada", "China", "France", "Germany", "Iceland", "India", "Sweden", "Uganda", "United States"), each = length(years)),
+  residuals = as.vector(residuals_matrix)
+)
+
+
+
+ggplot(residuals_data, aes(x = year, y = residuals, color = country)) +
+  geom_line() + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  
+  facet_wrap(~ country, scales = "free_y") + 
+  labs(title = "Residuals Over Time by Country",
+       x = "Year",
+       y = "Residual") +
+  theme_minimal() +
+  theme(panel.spacing = grid::unit(1, "lines"), legend.position = "none") 
+
+```
+
+```{r}
+posterior_rep_2 <- extract(rw_model_2)$y_rep
+post_mean_rep_2 <- apply(posterior_rep_2, c(2, 3), mean)
+residuals_matrix <- renewable_wide - apply(posterior_rep_2, c(2, 3), mean) 
+
+years <- 1990:2020 
+J <- ncol(residuals_matrix)  
+
+residuals_data <- data.frame(
+  year = rep(years, times = J),
+  country = rep(c("Brazil", "Canada", "China", "France", "Germany", "Iceland", "India", "Sweden", "Uganda", "United States"), each = length(years)),
+  residuals = as.vector(residuals_matrix)
+)
+
+
+
+ggplot(residuals_data, aes(x = year, y = residuals, color = country)) +
+  geom_line() +  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  
+  facet_wrap(~ country, scales = "free_y") +  
+  labs(title = "Residuals Over Time by Country",
+       x = "Year",
+       y = "Residual") +
+  theme_minimal() +
+  theme(panel.spacing = grid::unit(1, "lines"), legend.position = "none")  
+```
+
+We can see that the residual plots of both models are nearly exactly the same. After checking the posterior means of the response we observe that indeed the difference in residuals is nearly zero between the two models. Hence the conclusion is that model 1 could be better than model 2, since it is a simpler model.
+
+## Forecasting Results
+
+We will now compare the forecasting results of our two models. We have forecasted the renewable energy consumption over the next seven years for each of the selected countries:
+
+```{r}
+posterior_forecasts <- extract(rw_model)$y_pred  
+mean_forecasts <- apply(posterior_forecasts, c(2, 3), mean)
+sd_forecasts <- apply(posterior_forecasts, c(2, 3), sd)  
+n_samples <- dim(posterior_forecasts)[1]  
+se_forecasts <- sd_forecasts   
+
+forecast_years <- (2021:2027) 
+
+observed_data <- remove_missing |> select(year, country, renewable_energy)
+forecasted_data <- data.frame(
+  year = rep(forecast_years, times = 10),
+  country = rep(c("Brazil", "Canada", "China", "France", "Germany", "Iceland", "India", "Sweden", "Uganda", "United States"), each = length(forecast_years)),
+  renewable_energy = as.vector(mean_forecasts),
+  lower_bound = as.vector(mean_forecasts - 1.96 * se_forecasts),  
+  upper_bound = as.vector(mean_forecasts + 1.96 * se_forecasts)
+)
+forecasted_data <- forecasted_data |> arrange(year)
+ggplot() +
+  geom_line(data = observed_data, aes(x = year, y = renewable_energy, color = country)) +
+  geom_line(data = forecasted_data, aes(x = year, y = renewable_energy, color = country)) +
+  geom_ribbon(data = forecasted_data, aes(x = year, ymin = lower_bound, ymax = upper_bound, group = country), fill = "red", alpha = 0.2) +
+  facet_wrap(~country, scales = "free_y") +
+  labs(title = "Renewable Energy Forecasts for 2020-2025 based on Model 1",
+       x = "Year",
+       y = "Renewable Energy Consumption (%)") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+```
+
+```{r}
+posterior_forecasts_2 <- extract(rw_model_2)$y_pred  
+mean_forecasts_2 <- apply(posterior_forecasts_2, c(2, 3), mean)
+sd_forecasts_2 <- apply(posterior_forecasts_2, c(2, 3), sd)  
+n_samples_2 <- dim(posterior_forecasts_2)[1]  
+se_forecasts_2 <- sd_forecasts_2 
+
+observed_data <- remove_missing |> select(year, country, renewable_energy)
+forecasted_data_2 <- data.frame(
+  year = rep(forecast_years, times = 10),
+  country = rep(c("Brazil", "Canada", "China", "France", "Germany", "Iceland", "India", "Sweden", "Uganda", "United States"), each = length(forecast_years)),
+  renewable_energy = as.vector(mean_forecasts_2),
+  lower_bound = as.vector(mean_forecasts_2 - 1.96 * se_forecasts_2),  
+  upper_bound = as.vector(mean_forecasts_2 + 1.96 * se_forecasts_2)
+)
+forecasted_data_2 <- forecasted_data_2 |> arrange(year)
+
+ggplot() +
+  geom_line(data = observed_data, aes(x = year, y = renewable_energy, color = country)) +
+  geom_line(data = forecasted_data_2, aes(x = year, y = renewable_energy, color = country)) +
+  geom_ribbon(data = forecasted_data_2, aes(x = year, ymin = lower_bound, ymax = upper_bound, group = country), fill = "red", alpha = 0.2) +
+  facet_wrap(~country, scales = "free_y") +
+  labs(title = "Renewable Energy Forecasts for 2020-2025 based on Model 2",
+       x = "Year",
+       y = "Renewable Energy Consumption (%)") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+```
+
+We observe that, while the forecasts are also quite similar, the AR(2) model seems to predict more of a decrease in renewable energy consumption compared to model 1. Model 1 suggests that renewable energy consumption will increase in the next few years in countries such as Germany, France, Canada, Sweden and the US. On the other hand it predicts that consumption will decrease again in China, India and Brazil.
+
+# Discussion and Conclusion
+
+We have developed two forecasting models for the renewable energy consumption in ten different countries. It was found that the AR(1) model should be preferred for this forecasting problem. The model predicts that the renewable energy usage will increase in well developed countries such as Germany, France, Canada, Sweden and the US, but will decrease again in countries such as China, India and Brazil. The conclusion is quite interesting, since it suggests that countries that have enjoyed a good economical status for a long time (indicated by GDP for example) are able to increase their renewable energy production while maintaining high economical wealth. Recent strong economic developments in countries like China have relied partly on non-renewable energy investments, posing challenges to increasing clean energy usage without economic sacrifices.
+
+This analysis can be extend to be performed for multiple more countries and is quite useful therefore. It can be used to forecast the progress towards renewable energy and to determine countries that currently pose a barrier towards the progress. Then institutions such as the World Bank can look into measures of helping such countries get on the right track.
+
+So far we have only used two important indicators as covariates for this time series model. Future work could look into adding more covariates that could potentially have high correlations with renewable energy. Other time series models might also be worth looking into as well. For model comparisons the LOO-LFO validation could be implemented, which is based on the classical LOO validation of bayesian models. This technique is especially crucial in time series analysis due to the sequential nature of the data, where conventional random splitting used in cross-validation can disrupt the temporal order, leading to unrealistic training and testing scenarios.
+
+# References
+
+Dataset: [Dataset Link](https://datacatalog.worldbank.org/search/dataset/0037712)
+
+Github Repository: https://github.com/LarsKut/STA2024/tree/main/Final%20Project
